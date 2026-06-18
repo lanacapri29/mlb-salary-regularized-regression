@@ -1,0 +1,155 @@
+---
+title: "MLB Salary Prediction"
+author: "Lana Robison & other group members"
+format: pdf
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE,
+                      message = FALSE,
+                      warning = FALSE)
+```
+
+# Project 1 Setup
+
+```{r}
+library(tidyverse)
+library(tidymodels)
+library(Lahman)
+data("Batting")
+```
+
+# Part 1: Data Cleaning and Manipulation
+
+```{r}
+# Join the data
+full_data <- left_join(Batting, Salaries, by = c("yearID", "playerID"))
+
+# Drop rows with nas
+full_data_no_na <- full_data |> 
+  drop_na()
+
+# Create season total stats
+season_stats <- full_data_no_na |> 
+  group_by(playerID, yearID) |> 
+  summarize(
+    across(c(G:GIDP), ~sum(.x)),
+    salary = first(salary)
+  )
+  
+```
+
+# Part 2: Feature Engineering
+
+```{r}
+# Create new features
+season_stats_1 <- season_stats |> 
+  mutate(
+    BA = H / AB,
+    OBP = (H + BB + HBP) / (AB + BB + SF + HBP),
+    SLG = ((H - X2B - X3B - HR) + X2B*2 + X3B*3 + HR*4) / AB,
+    OPS = OBP + SLG
+  )
+```
+
+# Part 3: EDA
+
+```{r}
+# Salary vs BA 
+ggplot(season_stats_1, aes(x = BA, y = salary)) +
+  geom_point() +
+  geom_smooth(method = "lm") +
+  labs(title = "Salary vs Batting Average", 
+       x = "Batting Average", y = "Salary")
+```
+
+The scatterplot of of Batting Average vs Salary shows a positive relationship between the variables, although this relationship is not very strong. Most data points are concentrated around low batting averages. There are some possible outliers for players with very high salaries ($>\$30000000$) and players with a high batting average ($>0.625$). The weak but positive relationship suggests that batting average alone is not a strong predictor of salary.
+
+```{r}
+# Salary vs OPS
+ggplot(season_stats_1, aes(x = OPS, y = salary)) +
+  geom_point() +
+  geom_smooth(method = "lm") +
+  labs(title = "Salary vs OPS", x = "OPS", y = "Salary")
+```
+
+The scatterplot of of On-base Plus Slugging vs Salary shows a positive relationship between the variables, although weak. Most data points are concentrated at OPS values between $0$ and $1.5$. There are some possible outliers for players with very high salaries ($>\$30000000$) and players with a high OPS ($>3$). The weak but positive relationship suggests that on-base plus slugging alone is not a strong predictor of salary.
+
+# Part 4: Regression with a Penalty
+
+```{r}
+# Split the data
+modeling_data <- season_stats_1 |> 
+  select(-c(OBP, SLG, H, AB, BB, SF, HBP, X2B, X3B, HR))
+set.seed(77)
+data_split <- initial_split(modeling_data, prop = 0.8)
+train <- training(data_split)
+test <- testing(data_split)
+
+# Create a recipe
+glmnet_rec <- recipe(salary ~ ., data = train) |> 
+  update_role(playerID, yearID, new_role = "ID") |> 
+  step_naomit(all_numeric_predictors()) |> 
+  step_normalize(all_numeric_predictors())
+
+# Create model specifications
+glmnet_spec <- linear_reg(penalty = tune(), mixture = tune()) |> 
+  set_engine("glmnet") |> 
+  set_mode("regression")
+
+# Create a workflow
+glmnet_wf <- workflow() |> 
+  add_recipe(glmnet_rec) |> 
+  add_model(glmnet_spec)
+
+# Create a resampling object
+cv_folds <- vfold_cv(train, v = 3)
+
+# Create a tuning grid
+glmnet_grid <- grid_regular(
+  penalty(range = c(-20, 0)),
+  mixture(range = c(0, 1))
+)
+
+# Tune the model
+glmnet_tune <- tune_grid(
+  glmnet_wf,
+  resamples = cv_folds,
+  grid = glmnet_grid,
+  metrics = metric_set(rmse, mae, rsq, mape)
+)
+
+best_params <- glmnet_tune |> 
+  select_best(metric = "rmse")
+
+best_params
+```
+
+The best penalty is `r best_params$penalty` and the best mixture is `r best_params$mixture`.
+
+```{r}
+final_wf <- finalize_workflow(glmnet_wf, best_params)
+
+final_fit <- last_fit(final_wf, data_split)
+
+final_fit_metrics <- final_fit |> 
+  collect_metrics()
+
+final_fit_metrics |> 
+  filter(.metric == "rsq") |> pull(.estimate) |> 
+  round(3)*100
+```
+$$R^2 = 10.4\%$$
+
+# Part 5: Conclusion
+
+```{r}
+final_fit |> 
+  extract_fit_parsnip() |>
+  tidy()
+```
+
+After looking at the coefficients for the model, the variables G (games played) and R (runs) are most important to predicting salary. The model predicts salary decently, but not well. The RMSE shows that the average difference between the actual salary value and what the model predicts is \$`r final_fit_metrics |> filter(.metric == "rmse") |> pull(.estimate)`. The R^2^ value shows that `r final_fit_metrics |> filter(.metric == "rsq") |> pull(.estimate) |> round(3)*100`% of the variance in salary is explained by the model. These results are not ideal. In order to improve the model, we suggest conducting a separate regression for the original player statistics. The created player statistics, OBP, SLG, and OPS are helpful, but it could be beneficial to assess the impact of the original statistics on Salary. Additionally, we suggest removing players' with less than 50 AB's. This accounts for (some) player's who earn the baseline salary and hardly play and any players who earn a higher salary and play frequently, but suffered an injury that impacted their ability to play.
+
+
+
