@@ -1,0 +1,7 @@
+Metric,Value
+Test R-squared,0.104
+Top Predictor,Games Played
+Second Key Predictor,Runs
+Model Type,Regularized Linear Regression
+Engine,glmnet
+Framework,tidymodels
